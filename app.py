@@ -130,7 +130,8 @@ def telegram_webhook():
         )
         send_telegram(chat_id, reply)
     except Exception as e:
-        send_telegram(chat_id, "⚠️ Saved input, but couldn't parse structured tags. Make sure your API keys are valid.")
+        print(f"DETAILED ERROR: {e}", flush=True)
+        send_telegram(chat_id, f"⚠️ Debug Error Details:\n`{str(e)}`")
         
     return jsonify({"status": "ok"}), 200
 

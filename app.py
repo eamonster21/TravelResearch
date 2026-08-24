@@ -13,6 +13,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip().strip('"').stri
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
 SUPABASE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or "").strip().strip('"').strip("'")
 ORIGIN_CITY = os.getenv("ORIGIN_CITY", "Singapore").strip()
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 raw_supabase_url = os.getenv("SUPABASE_URL", "").strip().strip('"').strip("'")
 if raw_supabase_url and not raw_supabase_url.startswith("http"):
@@ -60,7 +61,7 @@ def extract_travel_taste(user_input: str) -> dict:
     
     try:
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=MODEL_NAME,
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())]
@@ -69,7 +70,7 @@ def extract_travel_taste(user_input: str) -> dict:
     except Exception as e:
         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
             response = gemini_client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=MODEL_NAME,
                 contents=prompt
             )
         else:
@@ -112,7 +113,7 @@ def generate_curated_plan(chat_id: int) -> str:
     
     try:
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=MODEL_NAME,
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())]
@@ -121,7 +122,7 @@ def generate_curated_plan(chat_id: int) -> str:
     except Exception as e:
         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
             response = gemini_client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=MODEL_NAME,
                 contents=prompt
             )
         else:
@@ -131,8 +132,12 @@ def generate_curated_plan(chat_id: int) -> str:
 
 # --- ASYNC THREAD WORKERS ---
 def process_plan_async(chat_id: int):
-    plan = generate_curated_plan(chat_id)
-    send_telegram(chat_id, plan)
+    try:
+        plan = generate_curated_plan(chat_id)
+        send_telegram(chat_id, plan)
+    except Exception as e:
+        print(f"PLAN GENERATION ERROR: {e}", flush=True)
+        send_telegram(chat_id, f"⚠️ Unable to generate plan: `{str(e)}`")
 
 def process_taste_async(chat_id: int, user_text: str):
     try:
@@ -153,8 +158,8 @@ def process_taste_async(chat_id: int, user_text: str):
         )
         send_telegram(chat_id, reply)
     except Exception as e:
-        print(f"DETAILED ERROR: {e}", flush=True)
-        send_telegram(chat_id, f"⚠️ Error: `{str(e)}`")
+        print(f"TASTE PARSING ERROR: {e}", flush=True)
+        send_telegram(chat_id, f"⚠️ Error recording taste: `{str(e)}`")
 
 # --- ROUTES ---
 @app.route("/", methods=["GET"])
@@ -189,8 +194,11 @@ def daily_digest():
     if isinstance(records, list):
         chat_ids = set(r["chat_id"] for r in records if "chat_id" in r)
         for cid in chat_ids:
-            plan = generate_curated_plan(cid)
-            send_telegram(cid, f"🌙 **Your Evening Travel & Live Deals Recommendation**\n\n{plan}")
+            try:
+                plan = generate_curated_plan(cid)
+                send_telegram(cid, f"🌙 **Your Evening Travel & Live Deals Recommendation**\n\n{plan}")
+            except Exception as e:
+                print(f"DIGEST ERROR for {cid}: {e}", flush=True)
     return jsonify({"status": "digest_sent"}), 200
 
 if __name__ == "__main__":

@@ -9,15 +9,13 @@ app = Flask(__name__)
 # --- CONFIGURATION ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
 ORIGIN_CITY = os.getenv("ORIGIN_CITY", "Singapore")
-
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # --- HELPER FUNCTIONS ---
 def send_telegram(chat_id: int, text: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_BOT_TOKEN}/sendMessage"
     httpx.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
 def supabase_request(method: str, endpoint: str, data=None, params=None):
@@ -30,7 +28,12 @@ def supabase_request(method: str, endpoint: str, data=None, params=None):
     url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/{endpoint}"
     with httpx.Client() as client:
         res = client.request(method, url, headers=headers, json=data, params=params)
-        return res.json()
+        if not res.text:
+            return []
+        try:
+            return res.json()
+        except Exception:
+            raise Exception(f"Supabase API Error ({res.status_code}): {res.text}")
 
 def extract_travel_taste(user_input: str) -> dict:
     prompt = f"""
@@ -49,12 +52,23 @@ def extract_travel_taste(user_input: str) -> dict:
         contents=prompt,
         config={"response_mime_type": "application/json"}
     )
-    return json.loads(response.text)
+    
+    # Clean text to strip Markdown code blocks if Gemini returns them
+    raw_text = response.text.strip()
+    if raw_text.startswith("```"):
+        lines = raw_text.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        raw_text = "\n".join(lines).strip()
+        
+    return json.loads(raw_text)
 
 def generate_curated_plan(chat_id: int) -> str:
     records = supabase_request("GET", "user_interests", params={"chat_id": f"eq.{chat_id}", "select": "*"})
     
-    if not records or "error" in records or len(records) == 0:
+    if not records or isinstance(records, dict) and "error" in records or len(records) == 0:
         return "No travel tastes saved yet! Paste some travel links or tell me what you're interested in first."
     
     tastes_summary = "\n".join([f"- {r.get('summary', '')} (Vibe: {r.get('vibe', '')})" for r in records])

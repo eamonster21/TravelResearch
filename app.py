@@ -1,13 +1,14 @@
 import os
 import json
 import httpx
+import threading
 from flask import Flask, request, jsonify
 from google import genai
 from google.genai import types
 
 app = Flask(__name__)
 
-# --- CONFIGURATION (Sanitized) ---
+# --- CONFIGURATION ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip().strip('"').strip("'")
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
 SUPABASE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or "").strip().strip('"').strip("'")
@@ -58,7 +59,6 @@ def extract_travel_taste(user_input: str) -> dict:
     """
     
     try:
-        # Attempt with live Google Search grounding first
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
@@ -67,7 +67,6 @@ def extract_travel_taste(user_input: str) -> dict:
             )
         )
     except Exception as e:
-        # Fallback to standard model if rate-limited (429)
         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
             response = gemini_client.models.generate_content(
                 model="gemini-2.5-flash",
@@ -130,6 +129,33 @@ def generate_curated_plan(chat_id: int) -> str:
 
     return response.text
 
+# --- ASYNC THREAD WORKERS ---
+def process_plan_async(chat_id: int):
+    plan = generate_curated_plan(chat_id)
+    send_telegram(chat_id, plan)
+
+def process_taste_async(chat_id: int, user_text: str):
+    try:
+        parsed = extract_travel_taste(user_text)
+        supabase_request("POST", "user_interests", data={
+            "chat_id": chat_id,
+            "destination": parsed.get("destination", "General"),
+            "vibe": str(parsed.get("vibe", "")),
+            "activities": json.dumps(parsed.get("activities", [])),
+            "summary": parsed.get("summary", user_text)
+        })
+        reply = (
+            f"✅ **Taste Recorded!**\n\n"
+            f"📍 **Destination:** {parsed.get('destination')}\n"
+            f"✨ **Vibe:** {parsed.get('vibe')}\n"
+            f"📝 **Summary:** {parsed.get('summary')}\n\n"
+            f"Send more links anytime, or type `/plan` to generate an itinerary with live deals."
+        )
+        send_telegram(chat_id, reply)
+    except Exception as e:
+        print(f"DETAILED ERROR: {e}", flush=True)
+        send_telegram(chat_id, f"⚠️ Error: `{str(e)}`")
+
 # --- ROUTES ---
 @app.route("/", methods=["GET"])
 def home():
@@ -150,34 +176,11 @@ def telegram_webhook():
         
     if user_text.startswith("/plan"):
         send_telegram(chat_id, "🔍 Searching for live travel deals and curating your recommendation...")
-        plan = generate_curated_plan(chat_id)
-        send_telegram(chat_id, plan)
+        threading.Thread(target=process_plan_async, args=(chat_id,)).start()
         return jsonify({"status": "ok"}), 200
 
     send_telegram(chat_id, "⚡ Analyzing details and recording travel taste...")
-    try:
-        parsed = extract_travel_taste(user_text)
-        
-        supabase_request("POST", "user_interests", data={
-            "chat_id": chat_id,
-            "destination": parsed.get("destination", "General"),
-            "vibe": str(parsed.get("vibe", "")),
-            "activities": json.dumps(parsed.get("activities", [])),
-            "summary": parsed.get("summary", user_text)
-        })
-        
-        reply = (
-            f"✅ **Taste Recorded!**\n\n"
-            f"📍 **Destination:** {parsed.get('destination')}\n"
-            f"✨ **Vibe:** {parsed.get('vibe')}\n"
-            f"📝 **Summary:** {parsed.get('summary')}\n\n"
-            f"Send more links anytime, or type `/plan` to generate an itinerary with live deals."
-        )
-        send_telegram(chat_id, reply)
-    except Exception as e:
-        print(f"DETAILED ERROR: {e}", flush=True)
-        send_telegram(chat_id, f"⚠️ Error: `{str(e)}`")
-        
+    threading.Thread(target=process_taste_async, args=(chat_id, user_text)).start()
     return jsonify({"status": "ok"}), 200
 
 @app.route("/cron/daily-digest", methods=["GET", "POST"])

@@ -6,17 +6,25 @@ from google import genai
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
-ORIGIN_CITY = os.getenv("ORIGIN_CITY", "Singapore")
+# --- CONFIGURATION (Sanitized) ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip().strip('"').strip("'")
+GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
+SUPABASE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or "").strip().strip('"').strip("'")
+ORIGIN_CITY = os.getenv("ORIGIN_CITY", "Singapore").strip()
+
+raw_supabase_url = os.getenv("SUPABASE_URL", "").strip().strip('"').strip("'")
+if raw_supabase_url and not raw_supabase_url.startswith("http"):
+    SUPABASE_URL = f"https://{raw_supabase_url}"
+else:
+    SUPABASE_URL = raw_supabase_url
+
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # --- HELPER FUNCTIONS ---
 def send_telegram(chat_id: int, text: str):
-    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_BOT_TOKEN}/sendMessage"
-    httpx.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    with httpx.Client() as client:
+        client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
 def supabase_request(method: str, endpoint: str, data=None, params=None):
     headers = {
@@ -53,7 +61,6 @@ def extract_travel_taste(user_input: str) -> dict:
         config={"response_mime_type": "application/json"}
     )
     
-    # Clean text to strip Markdown code blocks if Gemini returns them
     raw_text = response.text.strip()
     if raw_text.startswith("```"):
         lines = raw_text.splitlines()
@@ -68,7 +75,7 @@ def extract_travel_taste(user_input: str) -> dict:
 def generate_curated_plan(chat_id: int) -> str:
     records = supabase_request("GET", "user_interests", params={"chat_id": f"eq.{chat_id}", "select": "*"})
     
-    if not records or isinstance(records, dict) and "error" in records or len(records) == 0:
+    if not records or (isinstance(records, dict) and "error" in records) or len(records) == 0:
         return "No travel tastes saved yet! Paste some travel links or tell me what you're interested in first."
     
     tastes_summary = "\n".join([f"- {r.get('summary', '')} (Vibe: {r.get('vibe', '')})" for r in records])

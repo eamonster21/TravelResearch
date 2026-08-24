@@ -45,7 +45,7 @@ def extract_travel_taste(user_input: str) -> dict:
     Return strictly JSON with keys: "destination", "vibe", "activities", "summary".
     """
     response = gemini_client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         contents=prompt,
         config={"response_mime_type": "application/json"}
     )
@@ -74,7 +74,7 @@ def generate_curated_plan(chat_id: int) -> str:
     Keep it engaging, concise, and formatted with Markdown and emojis.
     """
     response = gemini_client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         contents=prompt
     )
     return response.text

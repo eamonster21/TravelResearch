@@ -3,10 +3,11 @@ import json
 import httpx
 from flask import Flask, request, jsonify
 from google import genai
+from google.genai import types
 
 app = Flask(__name__)
 
-# --- CONFIGURATION (Sanitized) ---
+# --- CONFIGURATION ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip().strip('"').strip("'")
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
 SUPABASE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or "").strip().strip('"').strip("'")
@@ -45,20 +46,24 @@ def supabase_request(method: str, endpoint: str, data=None, params=None):
 
 def extract_travel_taste(user_input: str) -> dict:
     prompt = f"""
-    Analyze this travel request, link description, or input: "{user_input}"
+    Search Google to identify what this travel link, spot, or mention is about: "{user_input}"
     
-    Extract:
-    1. Primary Destination(s) (City, Country).
-    2. Vibe/Style (e.g., minimalist cafes, boutique stay, nature, food markets).
-    3. Key activities mentioned.
-    4. A concise 1-sentence summary of the user's acquired taste.
+    Extract the following details and return strictly a valid JSON object:
+    - "destination": Primary Destination (City, Country or Island)
+    - "vibe": Aesthetic/Vibe (e.g. beach resort, aesthetic cafe, luxury stay)
+    - "activities": List of activities mentioned or suitable
+    - "summary": A concise 1-sentence summary of the travel interest
     
-    Return strictly JSON with keys: "destination", "vibe", "activities", "summary".
+    Format: {{"destination": "...", "vibe": "...", "activities": [...], "summary": "..."}}
     """
+    
+    # Enable live Google Search grounding
     response = gemini_client.models.generate_content(
         model="gemini-3.6-flash",
         contents=prompt,
-        config={"response_mime_type": "application/json"}
+        config=types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        )
     )
     
     raw_text = response.text.strip()
@@ -76,34 +81,39 @@ def generate_curated_plan(chat_id: int) -> str:
     records = supabase_request("GET", "user_interests", params={"chat_id": f"eq.{chat_id}", "select": "*"})
     
     if not records or (isinstance(records, dict) and "error" in records) or len(records) == 0:
-        return "No travel tastes saved yet! Paste some travel links or tell me what you're interested in first."
+        return "No travel tastes saved yet! Send me a link or spot first."
     
     tastes_summary = "\n".join([f"- {r.get('summary', '')} (Vibe: {r.get('vibe', '')})" for r in records])
     
     prompt = f"""
     You are an elite travel concierge based in {ORIGIN_CITY}.
-    Here is the user's acquired travel profile and saved interests:
+    The user's saved travel tastes are:
     {tastes_summary}
     
-    Create a curated travel plan suggestion for their next getaway.
-    Include:
-    - Target Destination matching their aesthetic
-    - Why it fits their preferences
-    - A 3-day highlight itinerary (Stay, Food, Activities)
-    - Practical travel tip departing from {ORIGIN_CITY}
+    1. Pick the best destination matching their taste profile.
+    2. Search Google live for current travel deals, ferry/flight prices, and package promotions departing from {ORIGIN_CITY}.
+    3. Build a curated getaway plan featuring:
+       - 📍 Target Destination & why it fits
+       - 🏷️ Real-time Live Deals & Promotions departing from {ORIGIN_CITY}
+       - 🗓️ Dated Highlight Itinerary (Stay, Food, Activities)
+       - 💡 Travel Tip (ferry duration, transit, or best booking platform)
     
-    Keep it engaging, concise, and formatted with Markdown and emojis.
+    Format cleanly with Markdown and emojis.
     """
+    
     response = gemini_client.models.generate_content(
         model="gemini-3.6-flash",
-        contents=prompt
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        )
     )
     return response.text
 
 # --- ROUTES ---
 @app.route("/", methods=["GET"])
 def home():
-    return "Travel Intelligence Webhook Engine (Gemini Powered) is active!", 200
+    return "Travel Intelligence Webhook Engine (Google Search Grounded) is active!", 200
 
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
@@ -115,16 +125,16 @@ def telegram_webhook():
     user_text = update["message"]["text"]
     
     if user_text.startswith("/start"):
-        send_telegram(chat_id, "👋 **Travel Intelligence Bot (Gemini Powered)**\n\nSend me links or ideas. I'll record your tastes and curate custom travel plans!\n\nType `/plan` anytime for a fresh itinerary.")
+        send_telegram(chat_id, "👋 **Travel Intelligence Bot (Live Search Grounded)**\n\nSend me links, video URLs, or travel spots. I'll search Google live, save your tastes, and find active travel deals!\n\nType `/plan` anytime for a curated itinerary with live deals.")
         return jsonify({"status": "ok"}), 200
         
     if user_text.startswith("/plan"):
-        send_telegram(chat_id, "✨ Curating a travel recommendation based on your profile...")
+        send_telegram(chat_id, "🔍 Searching Google for live travel deals and curating your recommendation...")
         plan = generate_curated_plan(chat_id)
         send_telegram(chat_id, plan)
         return jsonify({"status": "ok"}), 200
 
-    send_telegram(chat_id, "⚡ Analyzing input and updating your travel taste profile...")
+    send_telegram(chat_id, "⚡ Searching web details and recording travel taste...")
     try:
         parsed = extract_travel_taste(user_text)
         
@@ -141,7 +151,7 @@ def telegram_webhook():
             f"📍 **Destination:** {parsed.get('destination')}\n"
             f"✨ **Vibe:** {parsed.get('vibe')}\n"
             f"📝 **Summary:** {parsed.get('summary')}\n\n"
-            f"Send more links anytime, or type `/plan` to get your custom itinerary."
+            f"Send more links anytime, or type `/plan` to generate an itinerary with live deals."
         )
         send_telegram(chat_id, reply)
     except Exception as e:
@@ -157,7 +167,7 @@ def daily_digest():
         chat_ids = set(r["chat_id"] for r in records if "chat_id" in r)
         for cid in chat_ids:
             plan = generate_curated_plan(cid)
-            send_telegram(cid, f"🌙 **Your Evening Travel Recommendation**\n\n{plan}")
+            send_telegram(cid, f"🌙 **Your Evening Travel & Live Deals Recommendation**\n\n{plan}")
     return jsonify({"status": "digest_sent"}), 200
 
 if __name__ == "__main__":

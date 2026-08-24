@@ -7,7 +7,7 @@ from google.genai import types
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION (Sanitized) ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip().strip('"').strip("'")
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
 SUPABASE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or "").strip().strip('"').strip("'")
@@ -46,7 +46,7 @@ def supabase_request(method: str, endpoint: str, data=None, params=None):
 
 def extract_travel_taste(user_input: str) -> dict:
     prompt = f"""
-    Search Google to identify what this travel link, spot, or mention is about: "{user_input}"
+    Identify what this travel link, spot, or mention is about: "{user_input}"
     
     Extract the following details and return strictly a valid JSON object:
     - "destination": Primary Destination (City, Country or Island)
@@ -57,15 +57,25 @@ def extract_travel_taste(user_input: str) -> dict:
     Format: {{"destination": "...", "vibe": "...", "activities": [...], "summary": "..."}}
     """
     
-    # Enable live Google Search grounding
-    response = gemini_client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())]
+    try:
+        # Attempt with live Google Search grounding first
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
         )
-    )
-    
+    except Exception as e:
+        # Fallback to standard model if rate-limited (429)
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            response = gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt
+            )
+        else:
+            raise e
+
     raw_text = response.text.strip()
     if raw_text.startswith("```"):
         lines = raw_text.splitlines()
@@ -95,25 +105,35 @@ def generate_curated_plan(chat_id: int) -> str:
     3. Build a curated getaway plan featuring:
        - 📍 Target Destination & why it fits
        - 🏷️ Real-time Live Deals & Promotions departing from {ORIGIN_CITY}
-       - 🗓️ Dated Highlight Itinerary (Stay, Food, Activities)
+       - 🗓️ 3-Day Highlight Itinerary (Stay, Food, Activities)
        - 💡 Travel Tip (ferry duration, transit, or best booking platform)
     
     Format cleanly with Markdown and emojis.
     """
     
-    response = gemini_client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())]
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
         )
-    )
+    except Exception as e:
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            response = gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt
+            )
+        else:
+            raise e
+
     return response.text
 
 # --- ROUTES ---
 @app.route("/", methods=["GET"])
 def home():
-    return "Travel Intelligence Webhook Engine (Google Search Grounded) is active!", 200
+    return "Travel Intelligence Webhook Engine is active!", 200
 
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
@@ -125,16 +145,16 @@ def telegram_webhook():
     user_text = update["message"]["text"]
     
     if user_text.startswith("/start"):
-        send_telegram(chat_id, "👋 **Travel Intelligence Bot (Live Search Grounded)**\n\nSend me links, video URLs, or travel spots. I'll search Google live, save your tastes, and find active travel deals!\n\nType `/plan` anytime for a curated itinerary with live deals.")
+        send_telegram(chat_id, "👋 **Travel Intelligence Bot**\n\nSend me links, video URLs, or travel spots. I'll record your tastes and find active travel deals!\n\nType `/plan` anytime for a curated itinerary with live deals.")
         return jsonify({"status": "ok"}), 200
         
     if user_text.startswith("/plan"):
-        send_telegram(chat_id, "🔍 Searching Google for live travel deals and curating your recommendation...")
+        send_telegram(chat_id, "🔍 Searching for live travel deals and curating your recommendation...")
         plan = generate_curated_plan(chat_id)
         send_telegram(chat_id, plan)
         return jsonify({"status": "ok"}), 200
 
-    send_telegram(chat_id, "⚡ Searching web details and recording travel taste...")
+    send_telegram(chat_id, "⚡ Analyzing details and recording travel taste...")
     try:
         parsed = extract_travel_taste(user_text)
         

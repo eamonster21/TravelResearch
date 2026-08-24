@@ -1,4 +1,4 @@
 flask
 httpx
-openai
+google-genai
 gunicorn

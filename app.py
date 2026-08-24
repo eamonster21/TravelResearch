@@ -2,27 +2,25 @@ import os
 import json
 import httpx
 from flask import Flask, request, jsonify
-from openai import OpenAI
+from google import genai
 
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
 ORIGIN_CITY = os.getenv("ORIGIN_CITY", "Singapore")
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # --- HELPER FUNCTIONS ---
 def send_telegram(chat_id: int, text: str):
-    """Sends a formatted message to Telegram."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     httpx.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
 def supabase_request(method: str, endpoint: str, data=None, params=None):
-    """Simple REST wrapper for Supabase to avoid SDK setup issues."""
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -35,7 +33,6 @@ def supabase_request(method: str, endpoint: str, data=None, params=None):
         return res.json()
 
 def extract_travel_taste(user_input: str) -> dict:
-    """Uses GPT-4o-mini to extract travel tastes and destinations from links or text."""
     prompt = f"""
     Analyze this travel request, link description, or input: "{user_input}"
     
@@ -47,19 +44,18 @@ def extract_travel_taste(user_input: str) -> dict:
     
     Return strictly JSON with keys: "destination", "vibe", "activities", "summary".
     """
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"}
+    response = gemini_client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config={"response_mime_type": "application/json"}
     )
-    return json.loads(response.choices[0].message.content)
+    return json.loads(response.text)
 
 def generate_curated_plan(chat_id: int) -> str:
-    """Reads saved tastes from Supabase and generates a customized itinerary."""
     records = supabase_request("GET", "user_interests", params={"chat_id": f"eq.{chat_id}", "select": "*"})
     
     if not records or "error" in records or len(records) == 0:
-        return "No travel tastes saved yet! Paste some TikTok/Instagram links or tell me what you're interested in first."
+        return "No travel tastes saved yet! Paste some travel links or tell me what you're interested in first."
     
     tastes_summary = "\n".join([f"- {r.get('summary', '')} (Vibe: {r.get('vibe', '')})" for r in records])
     
@@ -77,20 +73,19 @@ def generate_curated_plan(chat_id: int) -> str:
     
     Keep it engaging, concise, and formatted with Markdown and emojis.
     """
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}]
+    response = gemini_client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt
     )
-    return response.choices[0].message.content
+    return response.text
 
-# --- ROUTES & HANDLERS ---
+# --- ROUTES ---
 @app.route("/", methods=["GET"])
 def home():
-    return "Travel Intelligence Webhook Engine is active!", 200
+    return "Travel Intelligence Webhook Engine (Gemini Powered) is active!", 200
 
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
-    """Wakes up on-demand whenever a Telegram message is received."""
     update = request.get_json(force=True)
     if "message" not in update or "text" not in update["message"]:
         return jsonify({"status": "ignored"}), 200
@@ -99,7 +94,7 @@ def telegram_webhook():
     user_text = update["message"]["text"]
     
     if user_text.startswith("/start"):
-        send_telegram(chat_id, "👋 **Travel Intelligence Bot**\n\nSend me links (TikTok, IG, web) or text ideas (e.g. *'Research boutique stays in Bali'*). I'll record your tastes and curate custom travel plans!\n\nType `/plan` anytime for a fresh itinerary.")
+        send_telegram(chat_id, "👋 **Travel Intelligence Bot (Gemini Powered)**\n\nSend me links or ideas. I'll record your tastes and curate custom travel plans!\n\nType `/plan` anytime for a fresh itinerary.")
         return jsonify({"status": "ok"}), 200
         
     if user_text.startswith("/plan"):
@@ -108,7 +103,6 @@ def telegram_webhook():
         send_telegram(chat_id, plan)
         return jsonify({"status": "ok"}), 200
 
-    # Process links / input on demand
     send_telegram(chat_id, "⚡ Analyzing input and updating your travel taste profile...")
     try:
         parsed = extract_travel_taste(user_text)
@@ -131,13 +125,12 @@ def telegram_webhook():
         send_telegram(chat_id, reply)
     except Exception as e:
         print(f"DETAILED ERROR: {e}", flush=True)
-        send_telegram(chat_id, f"⚠️ Debug Error Details:\n`{str(e)}`")
+        send_telegram(chat_id, f"⚠️ Error: `{str(e)}`")
         
     return jsonify({"status": "ok"}), 200
 
 @app.route("/cron/daily-digest", methods=["GET", "POST"])
 def daily_digest():
-    """Triggered by an external daily timer (e.g., cron-job.org at 8 PM)."""
     records = supabase_request("GET", "user_interests", params={"select": "chat_id"})
     if isinstance(records, list):
         chat_ids = set(r["chat_id"] for r in records if "chat_id" in r)
